@@ -56,8 +56,8 @@ function IResearchAqlTestSuite(args) {
       db._dropView("UnitTestsView");
       v = db._createView("UnitTestsView", "arangosearch", {});
       meta = {
-        links: { 
-          "UnitTestsCollection": { 
+        links: {
+          "UnitTestsCollection": {
             includeAllFields: true,
             storeValues: "id",
             fields: {
@@ -73,8 +73,8 @@ function IResearchAqlTestSuite(args) {
 
       vg = db._createView("UnitTestsGraphView", "arangosearch", {});
       meta = {
-        links: { 
-          "UnitTestsGraphCollection": { 
+        links: {
+          "UnitTestsGraphCollection": {
             includeAllFields: true,
             storeValues: "id",
             fields: {
@@ -130,22 +130,14 @@ function IResearchAqlTestSuite(args) {
       db._drop("UnitTestsGraph");
       db._drop("UnitTestsGraphCollection");
     },
-    
+
     testViewInFunctionCall : function () {
       try {
         db._query("FOR doc IN 1..1 RETURN COUNT(UnitTestsView)");
+        fail();
       } catch (e) {
         assertEqual(ERRORS.ERROR_NOT_IMPLEMENTED.code, e.errorNum);
       }
-    },
-
-    testAttributeEqualityFilter : function () {
-      var result = db._query("FOR doc IN UnitTestsView SEARCH doc.a == 'foo' OPTIONS { waitForSync: true } RETURN doc").toArray();
-
-      assertEqual(result.length, 10);
-      result.forEach(function(res) {
-        assertEqual(res.a, "foo");
-      });
     },
 
     testMultipleAttributeEqualityFilter : function () {
@@ -155,6 +147,15 @@ function IResearchAqlTestSuite(args) {
       result.forEach(function(res) {
         assertEqual(res.a, "foo");
         assertEqual(res.b, "bar");
+      });
+    },
+
+    testAttributeEqualityFilter : function () {
+      var result = db._query("FOR doc IN UnitTestsView SEARCH doc.a == 'foo' OPTIONS { waitForSync: true } RETURN doc").toArray();
+
+      assertEqual(result.length, 10);
+      result.forEach(function(res) {
+        assertEqual(res.a, "foo");
       });
     },
 
@@ -489,7 +490,7 @@ function IResearchAqlTestSuite(args) {
       var results = [];
 
       results[0] = db._query(
-        "WITH UnitTestsGraphCollection " + 
+        "WITH UnitTestsGraphCollection " +
         "FOR doc IN UnitTestsGraphView " +
         "SEARCH doc.vName == 'vBegin' OPTIONS {waitForSync: true} " +
         "FOR v IN 2..2 OUTBOUND doc UnitTestsGraph " +
