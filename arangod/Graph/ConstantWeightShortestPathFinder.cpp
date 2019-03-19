@@ -43,7 +43,9 @@ using namespace arangodb::graph;
 
 ConstantWeightShortestPathFinder::PathSnippet::PathSnippet(arangodb::velocypack::StringRef& pred,
                                                            EdgeDocumentToken&& path)
-    : _pred(pred), _path(std::move(path)) {}
+    : _pred(pred), _path(std::move(path) {}
+
+
 
 ConstantWeightShortestPathFinder::ConstantWeightShortestPathFinder(ShortestPathOptions& options)
     : ShortestPathFinder(options) {}
@@ -52,6 +54,7 @@ ConstantWeightShortestPathFinder::~ConstantWeightShortestPathFinder() {
   clearVisited();
 }
 
+// 
 bool ConstantWeightShortestPathFinder::shortestPath(
     arangodb::velocypack::Slice const& s, arangodb::velocypack::Slice const& e,
     arangodb::graph::ShortestPathResult& result, std::function<void()> const& callback) {
@@ -60,18 +63,18 @@ bool ConstantWeightShortestPathFinder::shortestPath(
   TRI_ASSERT(e.isString());
   arangodb::velocypack::StringRef start(s);
   arangodb::velocypack::StringRef end(e);
+
   // Init
   if (start == end) {
     result._vertices.emplace_back(start);
     _options.fetchVerticesCoordinator(result._vertices);
     return true;
   }
-  _leftClosure.clear();
-  _rightClosure.clear();
-  clearVisited();
 
-  _leftFound.emplace(start, nullptr);
-  _rightFound.emplace(end, nullptr);
+  clearSearch();
+
+  _leftFound.emplace(start, {});
+  _rightFound.emplace(end, {});
   _leftClosure.emplace_back(start);
   _rightClosure.emplace_back(end);
 
@@ -102,64 +105,52 @@ bool ConstantWeightShortestPathFinder::expandClosure(Closure& sourceClosure,
                                                      Snippets& sourceSnippets,
                                                      Snippets& targetSnippets,
                                                      bool isBackward, arangodb::velocypack::StringRef& result) {
+  size_t foundPaths = 0;
+
   _nextClosure.clear();
   for (auto& v : sourceClosure) {
     _edges.clear();
     _neighbors.clear();
+
     expandVertex(isBackward, v);
     size_t const neighborsSize = _neighbors.size();
     TRI_ASSERT(_edges.size() == neighborsSize);
 
+    auto sourceSnippet = sourceSnippets.find(v);
+    // This has to be present in the snippets,
+    // otherwise it would not be in sourceClosure
+    TRI_ASSERT(sourceSnippet != sourceSnippets.end());
+
+    // Number of paths to v
+    size_t pathsToV = sourceSnippet->n;
+
     for (size_t i = 0; i < neighborsSize; ++i) {
       auto const& n = _neighbors[i];
-      if (sourceSnippets.find(n) == sourceSnippets.end()) {
-        // NOTE: _edges[i] stays intact after move
-        // and is reset to a nullptr. So if we crash
-        // here no mem-leaks. or undefined behavior
-        // Just make sure _edges is not used after
-        sourceSnippets.emplace(n, new PathSnippet(v, std::move(_edges[i])));
-        auto targetFoundIt = targetSnippets.find(n);
-        if (targetFoundIt != targetSnippets.end()) {
-          result = n;
-          return true;
-        }
-        _nextClosure.emplace_back(n);
+
+      // NOTE: _edges[i] stays intact after move
+      // and is reset to a nullptr. So if we crash
+      // here no mem-leaks. or undefined behavior
+      // Just make sure _edges is not used after
+      auto f = sourceSnippets.emplace(n, FoundVertex());
+      f->first.npaths += pathsToV;
+      f->first.snippets.emplace(std::move(_edges[i]));
+
+      // The intersection between vertices found from the start vertex
+      // and vertices found from the end vertices is not empty
+      auto targetFoundIt = targetSnippets.find(n);
+      if (targetFoundIt != targetSnippets.end()) {
+        foundpaths += pathsToV + targetFoundIt->npaths;
+        if(foundpaths >= maxpaths)
+          return foundpaths;
       }
+      _nextClosure.emplace_back(n);
     }
   }
   _edges.clear();
   _neighbors.clear();
   sourceClosure.swap(_nextClosure);
   _nextClosure.clear();
-  return false;
-}
-
-void ConstantWeightShortestPathFinder::fillResult(arangodb::velocypack::StringRef& n,
-                                                  arangodb::graph::ShortestPathResult& result) {
-  result._vertices.emplace_back(n);
-  auto it = _leftFound.find(n);
-  TRI_ASSERT(it != _leftFound.end());
-  arangodb::velocypack::StringRef next;
-  while (it != _leftFound.end() && it->second != nullptr) {
-    next = it->second->_pred;
-    result._vertices.push_front(next);
-    result._edges.push_front(std::move(it->second->_path));
-    it = _leftFound.find(next);
-  }
-  it = _rightFound.find(n);
-  TRI_ASSERT(it != _rightFound.end());
-  while (it != _rightFound.end() && it->second != nullptr) {
-    next = it->second->_pred;
-    result._vertices.emplace_back(next);
-    result._edges.emplace_back(std::move(it->second->_path));
-    it = _rightFound.find(next);
-  }
-
-  TRI_IF_FAILURE("TraversalOOMPath") {
-    THROW_ARANGO_EXCEPTION(TRI_ERROR_DEBUG);
-  }
-  _options.fetchVerticesCoordinator(result._vertices);
-  clearVisited();
+  return 0;
 }
 
 void ConstantWeightShortestPathFinder::expandVertex(bool backward, arangodb::velocypack::StringRef vertex) {
@@ -192,14 +183,36 @@ void ConstantWeightShortestPathFinder::expandVertex(bool backward, arangodb::vel
   edgeCursor->readAll(callback);
 }
 
-void ConstantWeightShortestPathFinder::clearVisited() {
-  for (auto& it : _leftFound) {
-    delete it.second;
+void ConstantWeightShortestPathFinder::fillResult(arangodb::velocypack::StringRef& n,
+                                                  arangodb::graph::ShortestPathResult& result) {
+  result._vertices.emplace_back(n);
+  auto it = _leftFound.find(n);
+  TRI_ASSERT(it != _leftFound.end());
+  arangodb::velocypack::StringRef next;
+  while (it != _leftFound.end() && it->second != nullptr) {
+    next = it->second->_pred;
+    result._vertices.push_front(next);
+    result._edges.push_front(std::move(it->second->_path));
+    it = _leftFound.find(next);
   }
-  _leftFound.clear();
+  it = _rightFound.find(n);
+  TRI_ASSERT(it != _rightFound.end());
+  next = it->second->_pred;
+  result._vertices.emplace_back(next);
+  result._edges.emplace_back(std::move(it->second->_path));
+  it = _rightFound.find(next);
+}
 
-  for (auto& it : _rightFound) {
-    delete it.second;
-  }
+TRI_IF_FAILURE("TraversalOOMPath") {
+  THROW_ARANGO_EXCEPTION(TRI_ERROR_DEBUG);
+}
+_options.fetchVerticesCoordinator(result._vertices);
+clearVisited();
+}
+
+void ConstantWeightShortestPathFinder::resetSearch() {
+  _leftClosure.clear();
+  _leftFound.clear();
+  _rightClosure.clear();
   _rightFound.clear();
 }

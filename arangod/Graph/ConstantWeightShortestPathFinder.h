@@ -42,15 +42,35 @@ struct ShortestPathOptions;
 
 class ConstantWeightShortestPathFinder : public ShortestPathFinder {
  private:
+  // Used to store extra information about found
+  // paths
   struct PathSnippet {
+    // predecessor vertex on path
     arangodb::velocypack::StringRef const _pred;
+    // edge _pred -> n
     graph::EdgeDocumentToken _path;
 
     PathSnippet(arangodb::velocypack::StringRef& pred, graph::EdgeDocumentToken&& path);
   };
 
+  struct FoundVertex {
+    // Number of paths to this vertex
+    size_t npaths;
+
+    // A "snippet" consists of the predecessor of
+    // this vertex and the edge that was used to reach it.
+    std::vector<PathSnippet> snippets;
+
+    FoundVertex(void) : n(0), snippets({}){};
+  };
+
+  // A "Closure" is a frontier of a shortest path search
+  // this is a typedef, because we have a left and a right
+  // closure
   typedef std::deque<arangodb::velocypack::StringRef> Closure;
-  typedef std::unordered_map<arangodb::velocypack::StringRef, PathSnippet*> Snippets;
+
+  //
+  typedef std::unordered_map<arangodb::velocypack::StringRef, ClosureVertex> Snippets;
 
  public:
   explicit ConstantWeightShortestPathFinder(ShortestPathOptions& options);
@@ -65,7 +85,7 @@ class ConstantWeightShortestPathFinder : public ShortestPathFinder {
  private:
   void expandVertex(bool backward, arangodb::velocypack::StringRef vertex);
 
-  void clearVisited();
+  void resetSearch();
 
   bool expandClosure(Closure& sourceClosure, Snippets& sourceSnippets,
                      Snippets& targetSnippets, bool direction, arangodb::velocypack::StringRef& result);
