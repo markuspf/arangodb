@@ -64,7 +64,7 @@ class ConstantWeightKShortestPathsFinder : public ShortestPathFinder {
     VertexRef const _pred;
     graph::EdgeDocumentToken _path;
 
-    PathSnippet(VertexRef& pred, graph::EdgeDocumentToken&& path);
+    PathSnippet(VertexRef const& pred, graph::EdgeDocumentToken&& path);
   };
 
   struct FoundVertex {
@@ -127,9 +127,6 @@ class ConstantWeightKShortestPathsFinder : public ShortestPathFinder {
   explicit ConstantWeightKShortestPathsFinder(ShortestPathOptions& options);
   ~ConstantWeightKShortestPathsFinder();
 
-  //
-  void destroyEngines();
-
   // This is here because we inherit from ShortestPathFinder (to get the destroyEngines function)
   // TODO: Remove
   bool shortestPath(arangodb::velocypack::Slice const& start,
@@ -154,7 +151,7 @@ private:
                                     std::vector<graph::EdgeDocumentToken> edges);
 
   // returns the number of paths found
-  size_t advanceFrontier(Ball& source, Direction direction);
+  size_t advanceFrontier(Ball& source, const Ball& target, std::vector<VertexRef>& intersection);
 
   // Set all iterators in _leftFound and _rightFound to the beginning
   void preparePathIteration(void);

@@ -42,7 +42,7 @@
 using namespace arangodb;
 using namespace arangodb::graph;
 
-ConstantWeightKShortestPathsFinder::PathSnippet::PathSnippet(VertexRef& pred,
+ConstantWeightKShortestPathsFinder::PathSnippet::PathSnippet(VertexRef const& pred,
                                                            EdgeDocumentToken&& path)
     : _pred(pred), _path(std::move(path)) {}
 
@@ -78,7 +78,9 @@ size_t ConstantWeightKShortestPathsFinder::startKShortestPathsTraversal(
 
 // Finds the shortest path
 void ConstantWeightKShortestPathsFinder::meetClosures() {
-  while (!_left._frontier.empty() && !_right._frontier.empty()) {
+  std::vector<VertexRef> intersection;
+
+  while (!_left._frontier.empty() && !_right._frontier.empty() && intersection.empty()) {
 //    callback();
 
     // Choose the smaller frontier to expand.
@@ -86,9 +88,9 @@ void ConstantWeightKShortestPathsFinder::meetClosures() {
     //       fetching the neighbours, which might be expensive...
     if (_left._frontier.size() < _right._frontier.size()) {
       //
-      advanceFrontier(_left, FORWARD);
+      advanceFrontier(_left, _right, intersection);
     } else {
-      advanceFrontier(_right, BACKWARD);
+      advanceFrontier(_right, _left, intersection);
     }
   }
 }
@@ -96,6 +98,7 @@ void ConstantWeightKShortestPathsFinder::meetClosures() {
 void ConstantWeightKShortestPathsFinder::computeNeighbourhoodOfVertex(
     VertexRef vertex, Direction direction, std::vector<VertexRef>& neighbours,
     std::vector<graph::EdgeDocumentToken> edges) {
+
   std::unique_ptr<EdgeCursor> edgeCursor;
 
   switch (direction) {
@@ -131,17 +134,20 @@ void ConstantWeightKShortestPathsFinder::computeNeighbourhoodOfVertex(
   edgeCursor->readAll(callback);
 }
 
-size_t ConstantWeightKShortestPathsFinder::advanceFrontier(Ball& source, Direction direction) {
+size_t ConstantWeightKShortestPathsFinder::advanceFrontier(Ball& source,
+                                                           const Ball& target,
+                                                           std::vector<VertexRef>& intersection) {
   std::vector<VertexRef> neighbours;
   std::vector<graph::EdgeDocumentToken> edges;
   size_t depth = 0;
   size_t pathsToV = 0;
+  Frontier newFrontier;
 
   for (auto& v : source._frontier) {
     neighbours.clear();
     edges.clear();
 
-    computeNeighbourhoodOfVertex(v, direction, neighbours, edges);
+    computeNeighbourhoodOfVertex(v, source._direction, neighbours, edges);
     // TODO: This means "neighbours" can contain the same neighbour
     //       more than once
     TRI_ASSERT(edges.size() == neighbours.size());
@@ -163,19 +169,21 @@ size_t ConstantWeightKShortestPathsFinder::advanceFrontier(Ball& source, Directi
         w._npaths += pathsToV;
       }
 
-/*      auto found = foundToTarget.find(n);
-      if (found != foundToTarget.end()) {
+      auto found = target._vertices.find(n);
+      if (found != target._vertices.end()) {
         // This is a path joining node, but we do not know
         // yet whether we added all paths to it, so we have
         // to finish computing the closure.
-        result.emplace(n);
-      } */
+        intersection.emplace_back(n);
+      }
+
       // vertex was new
-      // if (inserted.second) {
-      //  _nextClosure.emplace_back(n);
-      // }
+      if (inserted.second) {
+        newFrontier.emplace_back(n);
+      }
     }
   }
+  source._frontier = newFrontier;
   return 0;
 }
 
