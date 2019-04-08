@@ -42,63 +42,62 @@
 using namespace arangodb;
 using namespace arangodb::graph;
 
-ConstantWeightKShortestPathsFinder::PathSnippet::PathSnippet(VertexRef const& pred,
-                                                           EdgeDocumentToken&& path)
-    : _pred(pred), _path(std::move(path)) {}
-
-
-
 //
 ConstantWeightKShortestPathsFinder::ConstantWeightKShortestPathsFinder(ShortestPathOptions& options)
-  : ShortestPathFinder(options) {
-}
+    : ShortestPathFinder(options), _pathAvailable(false) {}
 
-ConstantWeightKShortestPathsFinder::~ConstantWeightKShortestPathsFinder() {
-}
+ConstantWeightKShortestPathsFinder::~ConstantWeightKShortestPathsFinder() {}
 
 // Sets up k-shortest-paths traversal from start to end
 // Returns number of currently known paths
-size_t ConstantWeightKShortestPathsFinder::startKShortestPathsTraversal(
-  arangodb::velocypack::Slice const& start, arangodb::velocypack::Slice const& end) {
+bool ConstantWeightKShortestPathsFinder::startKShortestPathsTraversal(
+    arangodb::velocypack::Slice const& start, arangodb::velocypack::Slice const& end) {
+  // TODO: ?
   if (start == end) {
-    return 1;
+    return true;
   }
 
-  _firstPath = true;
-  _left.setup(arangodb::velocypack::StringRef(start), FORWARD);
-  _right.setup(arangodb::velocypack::StringRef(end), BACKWARD);
+  _start = arangodb::velocypack::StringRef(start);
+  _end = arangodb::velocypack::StringRef(end);
+  _pathAvailable = true;
+  _shortestPaths.clear();
 
-  // TODO: This probably should be moved
   TRI_IF_FAILURE("TraversalOOMInitialize") {
     THROW_ARANGO_EXCEPTION(TRI_ERROR_DEBUG);
   }
 
-  return 0;
+  return true;
 }
 
-// Finds the shortest path
-void ConstantWeightKShortestPathsFinder::meetClosures() {
-  std::vector<VertexRef> intersection;
+bool ConstantWeightKShortestPathsFinder::computeShortestPath(
+    const VertexRef& start, const VertexRef& end, const std::vector<VertexRef>& forbiddenVertices,
+    const std::vector<Edge>& forbiddenEdges, Path& result) {
+  bool found = false;
+  Ball left(start, FORWARD);
+  Ball right(end, BACKWARD);
+  VertexRef join;
 
-  while (!_left._frontier.empty() && !_right._frontier.empty() && intersection.empty()) {
-//    callback();
+  result.clear();
+
+  while (!left._frontier.empty() && !right._frontier.empty() && !found) {
+    //    callback();
 
     // Choose the smaller frontier to expand.
-    // TODO: could we use neighbourhood size? It requires
-    //       fetching the neighbours, which might be expensive...
-    if (_left._frontier.size() < _right._frontier.size()) {
-      //
-      advanceFrontier(_left, _right, intersection);
+    if (left._frontier.size() < right._frontier.size()) {
+      found = advanceFrontier(left, right, forbiddenVertices, forbiddenEdges, join);
     } else {
-      advanceFrontier(_right, _left, intersection);
+      found = advanceFrontier(right, left, forbiddenVertices, forbiddenEdges, join);
     }
   }
+  if (found) {
+    reconstructPath(left, right, join, result);
+  }
+  return found;
 }
 
 void ConstantWeightKShortestPathsFinder::computeNeighbourhoodOfVertex(
     VertexRef vertex, Direction direction, std::vector<VertexRef>& neighbours,
-    std::vector<graph::EdgeDocumentToken> edges) {
-
+    std::vector<Edge>& edges) {
   std::unique_ptr<EdgeCursor> edgeCursor;
 
   switch (direction) {
@@ -134,67 +133,175 @@ void ConstantWeightKShortestPathsFinder::computeNeighbourhoodOfVertex(
   edgeCursor->readAll(callback);
 }
 
-size_t ConstantWeightKShortestPathsFinder::advanceFrontier(Ball& source,
-                                                           const Ball& target,
-                                                           std::vector<VertexRef>& intersection) {
+bool ConstantWeightKShortestPathsFinder::advanceFrontier(
+    Ball& source, const Ball& target, const std::vector<VertexRef>& forbiddenVertices,
+    const std::vector<Edge>& forbiddenEdges, VertexRef& join) {
   std::vector<VertexRef> neighbours;
   std::vector<graph::EdgeDocumentToken> edges;
-  size_t depth = 0;
-  size_t pathsToV = 0;
   Frontier newFrontier;
+
+  // TODO: This is slow and has to be converted to hash tables.
+  auto isEdgeForbidden = [forbiddenEdges](const Edge& e) -> bool {
+    for (auto const& f : forbiddenEdges) {
+      if (f.equals(e)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  auto isVertexForbidden = [forbiddenVertices](const VertexRef& v) -> bool {
+    for (auto const& w : forbiddenVertices) {
+      if (w.equals(v)) {
+        return true;
+      }
+    }
+    return false;
+  };
 
   for (auto& v : source._frontier) {
     neighbours.clear();
     edges.clear();
 
     computeNeighbourhoodOfVertex(v, source._direction, neighbours, edges);
-    // TODO: This means "neighbours" can contain the same neighbour
-    //       more than once
     TRI_ASSERT(edges.size() == neighbours.size());
     size_t const neighboursSize = neighbours.size();
     for (size_t i = 0; i < neighboursSize; ++i) {
-      auto const& n = neighbours[i];
+      // FIXME: isEdgeForbidden is slow
+      if (!isEdgeForbidden(edges[i]) && !isVertexForbidden(neighbours[i])) {
+        auto const& n = neighbours[i];
 
-      // NOTE: _edges[i] stays intact after move
-      // and is reset to a nullptr. So if we crash
-      // here no mem-leaks. or undefined behavior
-      // Just make sure _edges is not used after
-      auto snippet = PathSnippet(v, std::move(edges[i]));
-      auto inserted = source._vertices.emplace(n, FoundVertex(false, depth + 1, pathsToV));
-      auto& w = inserted.first->second;
-      w._snippets.emplace_back(snippet);
+        // NOTE: _edges[i] stays intact after move
+        // and is reset to a nullptr. So if we crash
+        // here no mem-leaks. or undefined behavior
+        // Just make sure _edges is not used after
+        auto inserted =
+            source._vertices.emplace(n, FoundVertex(v, std::move(edges[i])));
 
-      // If we know this vertex and it is at the frontier, we found more paths
-      if (!inserted.second && w._depth == depth + 1) {
-        w._npaths += pathsToV;
-      }
-
-      auto found = target._vertices.find(n);
-      if (found != target._vertices.end()) {
-        // This is a path joining node, but we do not know
-        // yet whether we added all paths to it, so we have
-        // to finish computing the closure.
-        intersection.emplace_back(n);
-      }
-
-      // vertex was new
-      if (inserted.second) {
-        newFrontier.emplace_back(n);
+        // vertex was new
+        if (inserted.second) {
+          auto found = target._vertices.find(n);
+          if (found != target._vertices.end()) {
+            join = n;
+            return true;
+          }
+          newFrontier.emplace_back(n);
+        }
       }
     }
   }
   source._frontier = newFrontier;
-  return 0;
+  return false;
+}
+
+void ConstantWeightKShortestPathsFinder::reconstructPath(const Ball& left, const Ball& right,
+                                                         const VertexRef& join,
+                                                         Path& result) {
+  result.clear();
+
+  result._vertices.emplace_back(join);
+  auto it = left._vertices.find(join);
+  VertexRef next;
+  while (it != left._vertices.end() && !it->second._startOrEnd) {
+    next = it->second._pred;
+    result._vertices.push_front(next);
+    result._edges.push_front(it->second._edge);
+    it = left._vertices.find(next);
+  }
+  it = right._vertices.find(join);
+  while (it != right._vertices.end() && !it->second._startOrEnd) {
+    next = it->second._pred;
+    result._vertices.emplace_back(next);
+    result._edges.emplace_back(it->second._edge);
+    it = right._vertices.find(next);
+  }
+
+  TRI_IF_FAILURE("TraversalOOMPath") {
+    THROW_ARANGO_EXCEPTION(TRI_ERROR_DEBUG);
+  }
+
+  //  _options.fetchVerticesCoordinator(result._vertices);
 }
 
 bool ConstantWeightKShortestPathsFinder::getNextPath(arangodb::graph::ShortestPathResult& path) {
-  return false;
+  bool available = false;
+  Path kShortestPath, tmpPath, candidate;
+  std::vector<VertexRef> forbiddenVertices;
+  std::vector<Edge> forbiddenEdges;
+  std::vector<Path> candidates;
+
+  if (_shortestPaths.empty()) {
+    available = computeShortestPath(_start, _end, {}, {}, kShortestPath);
+  } else {
+    auto& lastShortestPath = _shortestPaths.back();
+
+    for (size_t i = 0; i < lastShortestPath.length() - 1; ++i) {
+      auto& spur = lastShortestPath._vertices.at(i);
+
+      forbiddenVertices.clear();
+      forbiddenEdges.clear();
+
+      // Must not use vertices on the prefix
+      for (size_t j = 0; j < i; ++j) {
+        forbiddenVertices.emplace_back(lastShortestPath._vertices[j]);
+      }
+
+      for (auto const& p : _shortestPaths) {
+        bool eq = true;
+        for (size_t e = 0; e < i; ++e) {
+          if (!p._edges.at(e).equals(lastShortestPath._edges.at(e))) {
+            eq = false;
+            break;
+          }
+        }
+        if (eq && (i < p._edges.size())) {
+          forbiddenEdges.emplace_back(p._edges.at(i));
+        }
+      }
+
+      if (computeShortestPath(spur, _end, forbiddenVertices, forbiddenEdges, tmpPath)) {
+        candidate.clear();
+        candidate.append(lastShortestPath, 0, i);
+        candidate.append(tmpPath, 0, tmpPath.length() - 1);
+        candidates.emplace_back(candidate);
+      }
+    }
+
+    if (!candidates.empty()) {
+      std::sort(candidates.begin(), candidates.end(), [](const Path& p1, const Path& p2) {
+        return p1._vertices.size() < p2._vertices.size();
+      });
+
+      auto const& p = candidates.front();
+      kShortestPath.clear();
+      kShortestPath.append(p, 0, p.length() - 1);
+      available = true;
+    }
+  }
+
+  if (available) {
+    _shortestPaths.emplace_back(kShortestPath);
+
+    path.clear();
+    path._vertices = kShortestPath._vertices;
+    // WHUPS. Fix.
+    for (auto& e : kShortestPath._edges) {
+      path._edges.emplace_back(std::move(e));
+    }
+
+    _options.fetchVerticesCoordinator(path._vertices);
+
+    TRI_IF_FAILURE("TraversalOOMPath") {
+      THROW_ARANGO_EXCEPTION(TRI_ERROR_DEBUG);
+    }
+  }
+  _pathAvailable = available;
+  return available;
 }
 
 bool ConstantWeightKShortestPathsFinder::getNextPathAql(arangodb::velocypack::Builder& result) {
   ShortestPathResult path;
 
-  if(getNextPath(path)) {
+  if (getNextPath(path)) {
     result.clear();
     result.openObject();
 
@@ -204,16 +311,16 @@ bool ConstantWeightKShortestPathsFinder::getNextPathAql(arangodb::velocypack::Bu
       // TRI_ASSERT(it != nullptr);
       _options.cache()->insertEdgeIntoResult(it, result);
     }
-    result.close(); // Array
+    result.close();  // Array
 
     result.add(VPackValue("vertices"));
     result.openArray();
     for (auto const& it : path._vertices) {
       _options.cache()->insertVertexIntoResult(it, result);
     }
-    result.close(); // Array
+    result.close();  // Array
 
-    result.close(); // Object
+    result.close();  // Object
     TRI_ASSERT(result.isClosed());
     auto retresult = arangodb::aql::AqlValue(result.slice());
     return true;
@@ -221,10 +328,3 @@ bool ConstantWeightKShortestPathsFinder::getNextPathAql(arangodb::velocypack::Bu
     return false;
   }
 }
-
-void ConstantWeightKShortestPathsFinder::preparePathIteration(void) {
-}
-
-void ConstantWeightKShortestPathsFinder::advancePathIterator(void) {
-}
-

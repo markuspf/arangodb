@@ -56,35 +56,58 @@ class ConstantWeightKShortestPathsFinder : public ShortestPathFinder {
  private:
   // Mainly for readability
   typedef arangodb::velocypack::StringRef VertexRef;
+  typedef arangodb::graph::EdgeDocumentToken Edge;
   enum Direction { FORWARD, BACKWARD };
 
-  // A path snippet contains an edge and a vertex
-  // and is used to reconstruct the path
-  struct PathSnippet {
-    VertexRef const _pred;
-    graph::EdgeDocumentToken _path;
+  struct Path {
+    std::deque<VertexRef> _vertices;
+    std::deque<Edge> _edges;
 
-    PathSnippet(VertexRef const& pred, graph::EdgeDocumentToken&& path);
+    void clear() {
+      _vertices.clear();
+      _edges.clear();
+    };
+    size_t length() const { return _vertices.size(); };
+    void append(const Path& p, size_t a, size_t b) {
+      if (a == b) {
+        _vertices.emplace_back(p._vertices.at(a));
+      } else if (this->length() == 0) {
+        for (size_t i = a; i < b; ++i) {
+          _vertices.emplace_back(p._vertices.at(i));
+          _edges.emplace_back(p._edges.at(i));
+        }
+        _vertices.emplace_back(p._vertices.at(b));
+      } else {
+        if (this->_vertices.back().equals(p._vertices.front())) {
+          _edges.emplace_back(p._edges.at(a));
+
+          for (size_t i = a + 1; i < b; ++i) {
+            _vertices.emplace_back(p._vertices.at(i));
+            _edges.emplace_back(p._edges.at(i));
+          }
+          _vertices.emplace_back(p._vertices.at(b));
+        } else {
+        }
+      }
+    }
+    void print(const std::string& pre) const {
+      LOG_DEVEL << pre << " vertices " << _vertices.size();
+      LOG_DEVEL << pre << " edges    " << _edges.size();
+      for (auto& v : _vertices) {
+        LOG_DEVEL << pre << "  v " << v.toString();
+      }
+    }
   };
 
   struct FoundVertex {
-    // Number of paths to this vertex
     bool _startOrEnd;
-    size_t _depth;
-    size_t _npaths;
+    VertexRef const _pred;
+    Edge _edge;
 
-    // Predecessor edges
-    std::vector<PathSnippet> _snippets;
-
-    // Used to assemble paths
-    std::vector<PathSnippet>::iterator _tracer;
-
-    FoundVertex(void)
-        : _startOrEnd(false), _depth(0), _npaths(0), _snippets({}){};
+    FoundVertex(VertexRef const& pred, Edge&& edge)
+        : _startOrEnd(false), _pred(pred), _edge(std::move(edge)){};
     FoundVertex(bool startOrEnd)  // _npaths is 1 for start/end vertices
-        : _startOrEnd(startOrEnd), _depth(0), _npaths(1), _snippets({}){};
-    FoundVertex(bool startOrEnd, size_t depth, size_t npaths)
-        : _startOrEnd(startOrEnd), _depth(depth), _npaths(npaths), _snippets({}){};
+        : _startOrEnd(startOrEnd){};
   };
   typedef std::deque<VertexRef> Frontier;
   typedef std::deque<VertexRef> Trace;
@@ -102,7 +125,13 @@ class ConstantWeightKShortestPathsFinder : public ShortestPathFinder {
     Frontier _frontier;
     Trace _trace;
 
-    Ball(void) {};
+    Ball(void){};
+    Ball(const VertexRef& centre, Direction direction)
+        : _centre(centre),
+          _direction(direction),
+          _vertices({{centre, FoundVertex(true)}}),
+          _frontier({centre}){};
+
     void clear() {
       _vertices.clear();
       _frontier.clear();
@@ -113,10 +142,8 @@ class ConstantWeightKShortestPathsFinder : public ShortestPathFinder {
       _frontier.emplace_back(centre);
       _vertices.emplace(centre, FoundVertex(true));
     }
-    void setDirection(Direction direction) {
-      _direction = direction;
-    }
-    void setup(const VertexRef& centre, Direction direction){
+    void setDirection(Direction direction) { _direction = direction; }
+    void setup(const VertexRef& centre, Direction direction) {
       clear();
       setCentre(centre);
       setDirection(direction);
@@ -132,44 +159,42 @@ class ConstantWeightKShortestPathsFinder : public ShortestPathFinder {
   bool shortestPath(arangodb::velocypack::Slice const& start,
                     arangodb::velocypack::Slice const& target,
                     arangodb::graph::ShortestPathResult& result,
-                    std::function<void()> const& callback) { TRI_ASSERT(true); };
+                    std::function<void()> const& callback) {
+    TRI_ASSERT(true);
+  };
 
   //
-  size_t startKShortestPathsTraversal(arangodb::velocypack::Slice const& start,
-                                      arangodb::velocypack::Slice const& end);
+  bool startKShortestPathsTraversal(arangodb::velocypack::Slice const& start,
+                                    arangodb::velocypack::Slice const& end);
 
   // get the next available path as AQL value.
   bool getNextPathAql(arangodb::velocypack::Builder& builder);
   // get the next available path as a ShortestPathResult
   bool getNextPath(arangodb::graph::ShortestPathResult& path);
-  bool isPathAvailable( void ) { return false; };
-
-private:
-  void resetSearch();
-  void meetClosures();
-  void computeNeighbourhoodOfVertex(VertexRef vertex, Direction direction, std::vector<VertexRef>& neighbours,
-                                    std::vector<graph::EdgeDocumentToken> edges);
-
-  // returns the number of paths found
-  size_t advanceFrontier(Ball& source, const Ball& target, std::vector<VertexRef>& intersection);
-
-  // Set all iterators in _leftFound and _rightFound to the beginning
-  void preparePathIteration(void);
-
-  // Move to the next path
-  void advancePathIterator(void);
+  bool isPathAvailable(void) { return _pathAvailable; };
 
  private:
-  Ball _left;
-  Ball _right;
+  bool computeShortestPath(const VertexRef& start, const VertexRef& end,
+                           const std::vector<VertexRef>& forbiddenVertices,
+                           const std::vector<Edge>& forbiddenEdges, Path& result);
+  void reconstructPath(const Ball& left, const Ball& right,
+                       const VertexRef& join, Path& result);
 
-  // A bit ugly: I want the time to produce the next path
-  // to be spend when actually making that path, not after
-  // making the previous one.
-  // This makes the first path special, since all
-  // that needs to be done is to set all iterators to begin()
-  // If you have a prettier way of doing this, I'd like to hear it.
-  bool _firstPath;
+  void computeNeighbourhoodOfVertex(VertexRef vertex, Direction direction,
+                                    std::vector<VertexRef>& neighbours,
+                                    std::vector<Edge>& edges);
+
+  // returns the number of paths found
+  bool advanceFrontier(Ball& source, const Ball& target,
+                       const std::vector<VertexRef>& forbiddenVertices,
+                       const std::vector<Edge>& forbiddenEdges, VertexRef& join);
+
+ private:
+  bool _pathAvailable;
+
+  VertexRef _start;
+  VertexRef _end;
+  std::vector<Path> _shortestPaths;
 };
 
 }  // namespace graph
