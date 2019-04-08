@@ -48,8 +48,9 @@ class KShortestPathsNode : public GraphNode {
   /// @brief constructor with a vocbase and a collection name
  public:
   KShortestPathsNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-                   AstNode const* direction, AstNode const* start, AstNode const* target,
-                   AstNode const* graph, std::unique_ptr<graph::BaseOptions> options);
+                     AstNode const* direction, AstNode const* start,
+                     AstNode const* target, AstNode const* graph,
+                     std::unique_ptr<graph::BaseOptions> options);
 
   KShortestPathsNode(ExecutionPlan* plan, arangodb::velocypack::Slice const& base);
 
@@ -57,12 +58,12 @@ class KShortestPathsNode : public GraphNode {
 
   /// @brief Internal constructor to clone the node.
   KShortestPathsNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-                   std::vector<std::unique_ptr<Collection>> const& edgeColls,
-                   std::vector<std::unique_ptr<Collection>> const& vertexColls,
-                   std::vector<TRI_edge_direction_e> const& directions,
-                   Variable const* inStartVariable, std::string const& startVertexId,
-                   Variable const* inTargetVariable, std::string const& targetVertexId,
-                   std::unique_ptr<graph::BaseOptions> options);
+                     std::vector<std::unique_ptr<Collection>> const& edgeColls,
+                     std::vector<std::unique_ptr<Collection>> const& vertexColls,
+                     std::vector<TRI_edge_direction_e> const& directions,
+                     Variable const* inStartVariable, std::string const& startVertexId,
+                     Variable const* inTargetVariable, std::string const& targetVertexId,
+                     std::unique_ptr<graph::BaseOptions> options);
 
  public:
   /// @brief return the type of the node

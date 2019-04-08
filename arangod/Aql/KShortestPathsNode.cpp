@@ -30,10 +30,10 @@
 #include "Aql/Collection.h"
 #include "Aql/ExecutionBlockImpl.h"
 #include "Aql/ExecutionPlan.h"
-#include "Aql/Query.h"
 #include "Aql/KShortestPathsExecutor.h"
+#include "Aql/Query.h"
 #include "Graph/AttributeWeightShortestPathFinder.h"
-#include "Graph/ConstantWeightShortestPathFinder.h"
+#include "Graph/ConstantWeightKShortestPathsFinder.h"
 #include "Graph/ShortestPathFinder.h"
 #include "Graph/ShortestPathOptions.h"
 #include "Graph/ShortestPathResult.h"
@@ -72,7 +72,7 @@ static void parseNodeInput(AstNode const* node, std::string& id, Variable const*
   }
 }
 static KShortestPathsExecutorInfos::InputVertex prepareVertexInput(KShortestPathsNode const* node,
-                                                                 bool isTarget) {
+                                                                   bool isTarget) {
   using InputVertex = KShortestPathsExecutorInfos::InputVertex;
   if (isTarget) {
     if (node->usesTargetInVariable()) {
@@ -95,9 +95,9 @@ static KShortestPathsExecutorInfos::InputVertex prepareVertexInput(KShortestPath
 }  // namespace
 
 KShortestPathsNode::KShortestPathsNode(ExecutionPlan* plan, size_t id, TRI_vocbase_t* vocbase,
-                                   AstNode const* direction, AstNode const* start,
-                                   AstNode const* target, AstNode const* graph,
-                                   std::unique_ptr<BaseOptions> options)
+                                       AstNode const* direction, AstNode const* start,
+                                       AstNode const* target, AstNode const* graph,
+                                       std::unique_ptr<BaseOptions> options)
     : GraphNode(plan, id, vocbase, direction, graph, std::move(options)),
       _inStartVariable(nullptr),
       _inTargetVariable(nullptr),
@@ -135,6 +135,12 @@ KShortestPathsNode::KShortestPathsNode(ExecutionPlan* plan, size_t id, TRI_vocba
 
   parseNodeInput(start, _startVertexId, _inStartVariable);
   parseNodeInput(target, _targetVertexId, _inTargetVariable);
+
+  // Make sure we are LIMITed
+  if(!ast->root()->containsNodeType(NODE_TYPE_LIMIT)) {
+    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_QUERY_PARSE,
+                                   "k-shortest-paths queries must contain LIMIT statement.");
+  }
 }
 
 /// @brief Internal constructor to clone the node.
@@ -155,7 +161,8 @@ KShortestPathsNode::KShortestPathsNode(
 
 KShortestPathsNode::~KShortestPathsNode() {}
 
-KShortestPathsNode::KShortestPathsNode(ExecutionPlan* plan, arangodb::velocypack::Slice const& base)
+KShortestPathsNode::KShortestPathsNode(ExecutionPlan* plan,
+                                       arangodb::velocypack::Slice const& base)
     : GraphNode(plan, base),
       _inStartVariable(nullptr),
       _inTargetVariable(nullptr),
@@ -274,33 +281,29 @@ std::unique_ptr<ExecutionBlock> KShortestPathsNode::createBlock(
   KShortestPathsExecutorInfos::InputVertex sourceInput = ::prepareVertexInput(this, false);
   KShortestPathsExecutorInfos::InputVertex targetInput = ::prepareVertexInput(this, true);
 
-  std::unique_ptr<ShortestPathFinder> finder;
-  if (opts->useWeight()) {
-    finder.reset(new graph::AttributeWeightShortestPathFinder(*opts));
-  } else {
-    finder.reset(new graph::ConstantWeightShortestPathFinder(*opts));
-  }
+  std::unique_ptr<ConstantWeightKShortestPathsFinder> finder;
+  finder.reset(new graph::ConstantWeightKShortestPathsFinder(*opts));
 
   TRI_ASSERT(finder != nullptr);
   KShortestPathsExecutorInfos infos(inputRegisters, outputRegisters,
-                                  getRegisterPlan()->nrRegs[previousNode->getDepth()],
-                                  getRegisterPlan()->nrRegs[getDepth()],
-                                  getRegsToClear(), calcRegsToKeep(),
-                                  std::move(finder), std::move(outputRegisterMapping),
-                                  std::move(sourceInput), std::move(targetInput));
-  return std::make_unique<ExecutionBlockImpl<KShortestPathsExecutor>>(
-      &engine, this, std::move(infos));
+                                    getRegisterPlan()->nrRegs[previousNode->getDepth()],
+                                    getRegisterPlan()->nrRegs[getDepth()],
+                                    getRegsToClear(), calcRegsToKeep(),
+                                    std::move(finder), std::move(outputRegisterMapping),
+                                    std::move(sourceInput), std::move(targetInput));
+  return std::make_unique<ExecutionBlockImpl<KShortestPathsExecutor>>(&engine, this,
+                                                                      std::move(infos));
 }
 
 ExecutionNode* KShortestPathsNode::clone(ExecutionPlan* plan, bool withDependencies,
-                                       bool withProperties) const {
+                                         bool withProperties) const {
   TRI_ASSERT(!_optionsBuilt);
   auto oldOpts = static_cast<ShortestPathOptions*>(options());
   std::unique_ptr<BaseOptions> tmp = std::make_unique<ShortestPathOptions>(*oldOpts);
   auto c = std::make_unique<KShortestPathsNode>(plan, _id, _vocbase, _edgeColls,
-                                              _vertexColls, _directions, _inStartVariable,
-                                              _startVertexId, _inTargetVariable,
-                                              _targetVertexId, std::move(tmp));
+                                                _vertexColls, _directions, _inStartVariable,
+                                                _startVertexId, _inTargetVariable,
+                                                _targetVertexId, std::move(tmp));
   if (usesVertexOutVariable()) {
     auto vertexOutVariable = _vertexOutVariable;
     if (withProperties) {
