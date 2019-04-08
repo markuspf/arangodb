@@ -99,6 +99,7 @@ KShortestPathsNode::KShortestPathsNode(ExecutionPlan* plan, size_t id, TRI_vocba
                                        AstNode const* target, AstNode const* graph,
                                        std::unique_ptr<BaseOptions> options)
     : GraphNode(plan, id, vocbase, direction, graph, std::move(options)),
+      _pathOutVariable(nullptr),
       _inStartVariable(nullptr),
       _inTargetVariable(nullptr),
       _fromCondition(nullptr),
@@ -137,9 +138,10 @@ KShortestPathsNode::KShortestPathsNode(ExecutionPlan* plan, size_t id, TRI_vocba
   parseNodeInput(target, _targetVertexId, _inTargetVariable);
 
   // Make sure we are LIMITed
-  if(!ast->root()->containsNodeType(NODE_TYPE_LIMIT)) {
-    THROW_ARANGO_EXCEPTION_MESSAGE(TRI_ERROR_QUERY_PARSE,
-                                   "k-shortest-paths queries must contain LIMIT statement.");
+  if (!ast->root()->containsNodeType(NODE_TYPE_LIMIT)) {
+    THROW_ARANGO_EXCEPTION_MESSAGE(
+        TRI_ERROR_QUERY_PARSE,
+        "k-shortest-paths queries must contain LIMIT statement.");
   }
 }
 
@@ -152,6 +154,7 @@ KShortestPathsNode::KShortestPathsNode(
     std::string const& startVertexId, Variable const* inTargetVariable,
     std::string const& targetVertexId, std::unique_ptr<BaseOptions> options)
     : GraphNode(plan, id, vocbase, edgeColls, vertexColls, directions, std::move(options)),
+      _pathOutVariable(nullptr),
       _inStartVariable(inStartVariable),
       _startVertexId(startVertexId),
       _inTargetVariable(inTargetVariable),
@@ -164,10 +167,18 @@ KShortestPathsNode::~KShortestPathsNode() {}
 KShortestPathsNode::KShortestPathsNode(ExecutionPlan* plan,
                                        arangodb::velocypack::Slice const& base)
     : GraphNode(plan, base),
+      _pathOutVariable(nullptr),
       _inStartVariable(nullptr),
       _inTargetVariable(nullptr),
       _fromCondition(nullptr),
       _toCondition(nullptr) {
+
+  // Path out variable
+  if (base.hasKey("pathOutVariable")) {
+    _pathOutVariable =
+      Variable::varFromVPack(plan->getAst(), base, "pathOutVariable");
+  }
+
   // Start Vertex
   if (base.hasKey("startInVariable")) {
     _inStartVariable =
@@ -213,6 +224,12 @@ KShortestPathsNode::KShortestPathsNode(ExecutionPlan* plan,
 
 void KShortestPathsNode::toVelocyPackHelper(VPackBuilder& nodes, unsigned flags) const {
   GraphNode::toVelocyPackHelper(nodes, flags);  // call base class method
+  // Out variables
+  if (usesPathOutVariable()) {
+    nodes.add(VPackValue("pathOutVariable"));
+    pathOutVariable()->toVelocyPack(nodes);
+  }
+
   // In variables
   if (usesStartInVariable()) {
     nodes.add(VPackValue("startInVariable"));
@@ -261,17 +278,10 @@ std::unique_ptr<ExecutionBlock> KShortestPathsNode::createBlock(
 
   auto outputRegisters = std::make_shared<std::unordered_set<RegisterId>>();
   std::unordered_map<KShortestPathsExecutorInfos::OutputName, RegisterId, KShortestPathsExecutorInfos::OutputNameHash> outputRegisterMapping;
-  if (usesVertexOutVariable()) {
-    auto it = varInfo.find(vertexOutVariable()->id);
+  if (usesPathOutVariable()) {
+    auto it = varInfo.find(pathOutVariable()->id);
     TRI_ASSERT(it != varInfo.end());
-    outputRegisterMapping.emplace(KShortestPathsExecutorInfos::OutputName::VERTEX,
-                                  it->second.registerId);
-    outputRegisters->emplace(it->second.registerId);
-  }
-  if (usesEdgeOutVariable()) {
-    auto it = varInfo.find(edgeOutVariable()->id);
-    TRI_ASSERT(it != varInfo.end());
-    outputRegisterMapping.emplace(KShortestPathsExecutorInfos::OutputName::EDGE,
+    outputRegisterMapping.emplace(KShortestPathsExecutorInfos::OutputName::PATH,
                                   it->second.registerId);
     outputRegisters->emplace(it->second.registerId);
   }
@@ -304,22 +314,13 @@ ExecutionNode* KShortestPathsNode::clone(ExecutionPlan* plan, bool withDependenc
                                                 _vertexColls, _directions, _inStartVariable,
                                                 _startVertexId, _inTargetVariable,
                                                 _targetVertexId, std::move(tmp));
-  if (usesVertexOutVariable()) {
-    auto vertexOutVariable = _vertexOutVariable;
+  if (usesPathOutVariable()) {
+    auto pathOutVariable = _pathOutVariable;
     if (withProperties) {
-      vertexOutVariable = plan->getAst()->variables()->createVariable(vertexOutVariable);
+      pathOutVariable = plan->getAst()->variables()->createVariable(pathOutVariable);
     }
-    TRI_ASSERT(vertexOutVariable != nullptr);
-    c->setVertexOutput(vertexOutVariable);
-  }
-
-  if (usesEdgeOutVariable()) {
-    auto edgeOutVariable = _edgeOutVariable;
-    if (withProperties) {
-      edgeOutVariable = plan->getAst()->variables()->createVariable(edgeOutVariable);
-    }
-    TRI_ASSERT(edgeOutVariable != nullptr);
-    c->setEdgeOutput(edgeOutVariable);
+    TRI_ASSERT(pathOutVariable != nullptr);
+    c->setPathOutput(pathOutVariable);
   }
 
   // Temporary Filter Objects

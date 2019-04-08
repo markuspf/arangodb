@@ -1149,16 +1149,7 @@ ExecutionNode* ExecutionPlan::fromNodeKShortestPaths(ExecutionNode* previous,
   TRI_ASSERT(variable->type == NODE_TYPE_VARIABLE);
   auto v = static_cast<Variable*>(variable->getData());
   TRI_ASSERT(v != nullptr);
-  spNode->setVertexOutput(v);
-
-  if (node->numMembers() > 6) {
-    // return the edge as well
-    variable = node->getMember(6);
-    TRI_ASSERT(variable->type == NODE_TYPE_VARIABLE);
-    v = static_cast<Variable*>(variable->getData());
-    TRI_ASSERT(v != nullptr);
-    spNode->setEdgeOutput(v);
-  }
+  spNode->setPathOutput(v);
 
   ExecutionNode* en = registerNode(spNode);
   TRI_ASSERT(en != nullptr);

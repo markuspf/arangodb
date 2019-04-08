@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2018 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2019 ArangoDB GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
 /// you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 ///
 /// Copyright holder is ArangoDB GmbH, Cologne, Germany
 ///
-/// @author Michael Hackstein
+/// @author Markus Pfeiffer
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "KShortestPathsExecutor.h"
@@ -26,9 +26,10 @@
 #include "Aql/Query.h"
 #include "Aql/SingleRowFetcher.h"
 #include "Aql/Stats.h"
-#include "Graph/ShortestPathFinder.h"
+#include "Graph/ConstantWeightKShortestPathsFinder.h"
 #include "Graph/ShortestPathOptions.h"
 #include "Graph/ShortestPathResult.h"
+#include "Transaction/Helpers.h"
 
 #include <velocypack/Builder.h>
 #include <velocypack/Slice.h>
@@ -54,7 +55,7 @@ KShortestPathsExecutorInfos::KShortestPathsExecutorInfos(
     std::shared_ptr<std::unordered_set<RegisterId>> outputRegisters, RegisterId nrInputRegisters,
     RegisterId nrOutputRegisters, std::unordered_set<RegisterId> registersToClear,
     std::unordered_set<RegisterId> registersToKeep,
-    std::unique_ptr<graph::ShortestPathFinder>&& finder,
+    std::unique_ptr<graph::ConstantWeightKShortestPathsFinder>&& finder,
     std::unordered_map<OutputName, RegisterId, OutputNameHash>&& registerMapping,
     InputVertex&& source, InputVertex&& target)
     : ExecutorInfos(std::move(inputRegisters), std::move(outputRegisters),
@@ -68,7 +69,7 @@ KShortestPathsExecutorInfos::KShortestPathsExecutorInfos(
 KShortestPathsExecutorInfos::KShortestPathsExecutorInfos(KShortestPathsExecutorInfos&&) = default;
 KShortestPathsExecutorInfos::~KShortestPathsExecutorInfos() = default;
 
-arangodb::graph::ShortestPathFinder& KShortestPathsExecutorInfos::finder() const {
+arangodb::graph::ConstantWeightKShortestPathsFinder& KShortestPathsExecutorInfos::finder() const {
   TRI_ASSERT(_finder);
   return *_finder.get();
 }
@@ -101,11 +102,9 @@ bool KShortestPathsExecutorInfos::usesOutputRegister(OutputName type) const {
 }
 
 static std::string typeToString(KShortestPathsExecutorInfos::OutputName type) {
-  switch(type) {
-    case KShortestPathsExecutorInfos::VERTEX:
-      return std::string{"VERTEX"};
-    case KShortestPathsExecutorInfos::EDGE:
-      return std::string{"EDGE"};
+  switch (type) {
+    case KShortestPathsExecutorInfos::PATH:
+      return std::string{"PATH"};
     default:
       return std::string{"<INVALID("} + std::to_string(type) + ")>";
   }
@@ -115,8 +114,8 @@ RegisterId KShortestPathsExecutorInfos::findRegisterChecked(OutputName type) con
   auto const& it = _registerMapping.find(type);
   if (ADB_UNLIKELY(it == _registerMapping.end())) {
     THROW_ARANGO_EXCEPTION_MESSAGE(
-      TRI_ERROR_INTERNAL,
-      "Logic error: requested unused register type " + typeToString(type));
+        TRI_ERROR_INTERNAL,
+        "Logic error: requested unused register type " + typeToString(type));
   }
   return it->second;
 }
@@ -136,8 +135,6 @@ KShortestPathsExecutor::KShortestPathsExecutor(Fetcher& fetcher, Infos& infos)
       _input{CreateInvalidInputRowHint{}},
       _rowState(ExecutionState::HASMORE),
       _finder{infos.finder()},
-      _path{new arangodb::graph::ShortestPathResult{}},
-      _posInPath(1),
       _sourceBuilder{},
       _targetBuilder{} {
   if (!_infos.useRegisterForInput(false)) {
@@ -159,63 +156,54 @@ std::pair<ExecutionState, Result> KShortestPathsExecutor::shutdown(int errorCode
 std::pair<ExecutionState, NoStats> KShortestPathsExecutor::produceRow(OutputAqlItemRow& output) {
   NoStats s;
 
-  // Can be length 0 but never nullptr.
-  TRI_ASSERT(_path);
   while (true) {
-    if (_posInPath < _path->length()) {
-      if (_infos.usesOutputRegister(KShortestPathsExecutorInfos::VERTEX)) {
-        AqlValue vertex = _path->vertexToAqlValue(_infos.cache(), _posInPath);
-        AqlValueGuard guard{vertex, true};
-        output.moveValueInto(_infos.getOutputRegister(KShortestPathsExecutorInfos::VERTEX),
-                             _input, guard);
-      }
-      if (_infos.usesOutputRegister(KShortestPathsExecutorInfos::EDGE)) {
-        AqlValue edge = _path->edgeToAqlValue(_infos.cache(), _posInPath);
-        AqlValueGuard guard{edge, true};
-        output.moveValueInto(_infos.getOutputRegister(KShortestPathsExecutorInfos::EDGE),
-                             _input, guard);
-      }
-      _posInPath++;
+    // If we have paths available
+
+    transaction::BuilderLeaser tmp(_finder.options().trx());
+    tmp->clear();
+    if (_finder.getNextPathAql(*tmp.builder())) {
+      // Now we have some paths, maybe, so we go and output one of them
+      AqlValue path = AqlValue(*tmp.builder());
+      AqlValueGuard guard{path, true};
+      output.moveValueInto(_infos.getOutputRegister(KShortestPathsExecutorInfos::PATH),
+                           _input, guard);
       return {computeState(), s};
     }
-    TRI_ASSERT(_posInPath >= _path->length());
-    if (!fetchPath()) {
-      TRI_ASSERT(_posInPath >= _path->length());
-      // Either WAITING or DONE
+    if (!fetchPaths()) {
       return {_rowState, s};
     }
-    TRI_ASSERT(_posInPath < _path->length());
   }
 }
 
-bool KShortestPathsExecutor::fetchPath() {
+bool KShortestPathsExecutor::fetchPaths() {
   VPackSlice start;
   VPackSlice end;
   do {
+    // Fetch a row from upstream
     std::tie(_rowState, _input) = _fetcher.fetchRow();
     if (!_input.isInitialized()) {
-      // Either WAITING or DONE and nothing produced.
+      // Either WAITING or DONE, in either case we cannot produce any paths.
       TRI_ASSERT(_rowState == ExecutionState::WAITING || _rowState == ExecutionState::DONE);
       return false;
     }
+    // Check start and end for validity
     if (!getVertexId(false, start) || !getVertexId(true, end)) {
       // Fetch another row
       continue;
     }
     TRI_ASSERT(start.isString());
     TRI_ASSERT(end.isString());
-    _path->clear();
-  } while (!_finder.shortestPath(start, end, *_path, [this]() {
-    if (_finder.options().query()->killed()) {
-      THROW_ARANGO_EXCEPTION(TRI_ERROR_QUERY_KILLED);
-    }
-  }));
-  _posInPath = 0;
+  } while (!_finder.startKShortestPathsTraversal(start, end));
+  /* , *_path, [this]() {
+if (_finder.options().query()->killed()) {
+THROW_ARANGO_EXCEPTION(TRI_ERROR_QUERY_KILLED);
+}
+})); */
   return true;
 }
 
 ExecutionState KShortestPathsExecutor::computeState() const {
-  if (_rowState == ExecutionState::HASMORE || _posInPath < _path->length()) {
+  if (_rowState == ExecutionState::HASMORE || _finder.isPathAvailable()) {
     return ExecutionState::HASMORE;
   }
   return ExecutionState::DONE;

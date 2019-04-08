@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// DISCLAIMER
 ///
-/// Copyright 2018 ArangoDB GmbH, Cologne, Germany
+/// Copyright 2019 ArangoDB GmbH, Cologne, Germany
 ///
 /// Licensed under the Apache License, Version 2.0 (the "License");
 /// you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 ///
 /// Copyright holder is ArangoDB GmbH, Cologne, Germany
 ///
-/// @author Michael Hackstein
+/// @author Markus Pfeiffer
 ////////////////////////////////////////////////////////////////////////////////
 
 #ifndef ARANGOD_AQL_KSHORTEST_PATHS_EXECUTOR_H
@@ -38,6 +38,7 @@ class Slice;
 }
 
 namespace graph {
+class ConstantWeightKShortestPathsFinder;
 class ShortestPathFinder;
 class ShortestPathResult;
 class TraverserCache;
@@ -65,19 +66,20 @@ class KShortestPathsExecutorInfos : public ExecutorInfos {
         : type(REGISTER), reg(reg), value("") {}
   };
 
-  enum OutputName { VERTEX, EDGE };
+  enum OutputName { PATH };
   struct OutputNameHash {
     size_t operator()(OutputName v) const noexcept { return size_t(v); }
   };
 
-  KShortestPathsExecutorInfos(std::shared_ptr<std::unordered_set<RegisterId>> inputRegisters,
-                            std::shared_ptr<std::unordered_set<RegisterId>> outputRegisters,
-                            RegisterId nrInputRegisters, RegisterId nrOutputRegisters,
-                            std::unordered_set<RegisterId> registersToClear,
-                            std::unordered_set<RegisterId> registersToKeep,
-                            std::unique_ptr<graph::ShortestPathFinder>&& finder,
-                            std::unordered_map<OutputName, RegisterId, OutputNameHash>&& registerMapping,
-                            InputVertex&& source, InputVertex&& target);
+  KShortestPathsExecutorInfos(
+      std::shared_ptr<std::unordered_set<RegisterId>> inputRegisters,
+      std::shared_ptr<std::unordered_set<RegisterId>> outputRegisters,
+      RegisterId nrInputRegisters, RegisterId nrOutputRegisters,
+      std::unordered_set<RegisterId> registersToClear,
+      std::unordered_set<RegisterId> registersToKeep,
+      std::unique_ptr<graph::ConstantWeightKShortestPathsFinder>&& finder,
+      std::unordered_map<OutputName, RegisterId, OutputNameHash>&& registerMapping,
+      InputVertex&& source, InputVertex&& target);
 
   KShortestPathsExecutorInfos() = delete;
 
@@ -85,7 +87,7 @@ class KShortestPathsExecutorInfos : public ExecutorInfos {
   KShortestPathsExecutorInfos(KShortestPathsExecutorInfos const&) = delete;
   ~KShortestPathsExecutorInfos();
 
-  arangodb::graph::ShortestPathFinder& finder() const;
+  arangodb::graph::ConstantWeightKShortestPathsFinder& finder() const;
 
   /**
    * @brief test if we use a register or a constant input
@@ -111,7 +113,7 @@ class KShortestPathsExecutorInfos : public ExecutorInfos {
   /**
    * @brief test if we have an output register for this type
    *
-   * @param type: Either VERTEX or EDGE
+   * @param type: PATH
    */
   bool usesOutputRegister(OutputName type) const;
 
@@ -127,7 +129,7 @@ class KShortestPathsExecutorInfos : public ExecutorInfos {
 
  private:
   /// @brief the shortest path finder.
-  std::unique_ptr<arangodb::graph::ShortestPathFinder> _finder;
+  std::unique_ptr<arangodb::graph::ConstantWeightKShortestPathsFinder> _finder;
 
   /// @brief Mapping outputType => register
   std::unordered_map<OutputName, RegisterId, OutputNameHash> _registerMapping;
@@ -180,7 +182,7 @@ class KShortestPathsExecutor {
    *
    * @return false if we are done and no path could be found.
    */
-  bool fetchPath();
+  bool fetchPaths();
 
   /**
    * @brief compute the correct return state
@@ -192,11 +194,6 @@ class KShortestPathsExecutor {
 
   /**
    * @brief get the id of a input vertex
-   * Result will be in id parameter, it
-   * is guaranteed that the memory
-   * is managed until the next call of fetchPath.
-   *
-   * @return DONE if no more is expected
    */
   bool getVertexId(bool isTarget, arangodb::velocypack::Slice& id);
 
@@ -206,11 +203,7 @@ class KShortestPathsExecutor {
   InputAqlItemRow _input;
   ExecutionState _rowState;
   /// @brief the shortest path finder.
-  arangodb::graph::ShortestPathFinder& _finder;
-  /// @brief current computed path.
-  std::unique_ptr<graph::ShortestPathResult> _path;
-
-  size_t _posInPath;
+  arangodb::graph::ConstantWeightKShortestPathsFinder& _finder;
 
   /// @brief temporary memory mangement for source id
   arangodb::velocypack::Builder _sourceBuilder;

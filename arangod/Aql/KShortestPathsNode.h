@@ -81,6 +81,10 @@ class KShortestPathsNode : public GraphNode {
   ExecutionNode* clone(ExecutionPlan* plan, bool withDependencies,
                        bool withProperties) const override final;
 
+  bool usesPathOutVariable() const { return _pathOutVariable != nullptr; }
+  Variable const* pathOutVariable() const { return _pathOutVariable; }
+  void setPathOutput(Variable const* outVar) { _pathOutVariable = outVar; }
+
   /// @brief Test if this node uses an in variable or constant for start
   bool usesStartInVariable() const { return _inStartVariable != nullptr; }
 
@@ -100,11 +104,8 @@ class KShortestPathsNode : public GraphNode {
   /// @brief getVariablesSetHere
   std::vector<Variable const*> getVariablesSetHere() const override final {
     std::vector<Variable const*> vars;
-    if (usesVertexOutVariable()) {
-      vars.emplace_back(vertexOutVariable());
-    }
-    if (usesEdgeOutVariable()) {
-      vars.emplace_back(edgeOutVariable());
+    if (usesPathOutVariable()) {
+      vars.emplace_back(pathOutVariable());
     }
     return vars;
   }
@@ -125,6 +126,9 @@ class KShortestPathsNode : public GraphNode {
   void prepareOptions() override;
 
  private:
+  /// @brief path output variable
+  Variable const* _pathOutVariable;
+
   /// @brief input variable only used if _vertexId is unused
   Variable const* _inStartVariable;
 
